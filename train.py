@@ -52,3 +52,5 @@ if __name__ == '__main__':
     datamodule = ArgoverseV1DataModule.from_argparse_args(args)
     # 开始训练模型
     trainer.fit(model, datamodule)
+
+# 学习在windows vscode下使用git进行代码版本管理 231228
