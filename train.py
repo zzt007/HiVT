@@ -54,3 +54,4 @@ if __name__ == '__main__':
     trainer.fit(model, datamodule)
 
 # 学习在windows vscode下使用git进行代码版本管理 231228
+# 同步失败，说fail to connect，不知道什么问题
