@@ -31,7 +31,7 @@ from utils import DistanceDropEdge
 from utils import TemporalData
 from utils import init_weights
 
-
+# 这里的类为什么又是直接继承nn.Module，而不是像之前一样继承pl.LightningModule?
 class LocalEncoder(nn.Module):
 
     def __init__(self,
@@ -46,6 +46,7 @@ class LocalEncoder(nn.Module):
                  parallel: bool = False) -> None:
         super(LocalEncoder, self).__init__()
         self.historical_steps = historical_steps
+        # parallel 是指避免for循环，利用tensor并行计算
         self.parallel = parallel
 
         self.drop_edge = DistanceDropEdge(local_radius)
@@ -66,9 +67,9 @@ class LocalEncoder(nn.Module):
                                     embed_dim=embed_dim,
                                     num_heads=num_heads,
                                     dropout=dropout)
-
+    #  -> 这个符号代表指定方法的返回值类型，这里是torch.Tensor
     def forward(self, data: TemporalData) -> torch.Tensor:
-        for t in range(self.historical_steps):
+        for t in range(self.historical_steps): # 沿时间轴，在每一时刻上进行
             data[f'edge_index_{t}'], _ = subgraph(subset=~data['padding_mask'][:, t], edge_index=data.edge_index)
             data[f'edge_attr_{t}'] = \
                 data['positions'][data[f'edge_index_{t}'][0], t] - data['positions'][data[f'edge_index_{t}'][1], t]

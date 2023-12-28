@@ -80,6 +80,7 @@ class HiVT(pl.LightningModule):
                                   future_steps=future_steps,
                                   num_modes=num_modes,
                                   uncertain=True)
+        
         self.reg_loss = LaplaceNLLLoss(reduction='mean')
         self.cls_loss = SoftTargetCrossEntropyLoss(reduction='mean')
 
@@ -152,6 +153,7 @@ class HiVT(pl.LightningModule):
     def configure_optimizers(self):
         decay = set()
         no_decay = set()
+        # whitelist一般是权重需要更新的模块，blacklist则无需更新
         whitelist_weight_modules = (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.MultiheadAttention, nn.LSTM, nn.GRU)
         blacklist_weight_modules = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.LayerNorm, nn.Embedding)
         for module_name, module in self.named_modules():

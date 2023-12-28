@@ -57,3 +57,4 @@ if __name__ == '__main__':
 # 同步失败，说fail to connect，不知道什么问题
 
 # 使用git pull更新本地代码，现在用的是desktop，将此句更新上传至远程仓库，待会尝试在laptop上pull 231228-14：43
+# 成功git pull更新，并且，当出现fail to connect时，打开梯子，并且手动设置一下，export HTTPS_PROXY
