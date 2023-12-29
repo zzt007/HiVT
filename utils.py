@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from torch_geometric.data import Data
 
-
+# temporaldata是继承自图数据的，这里是给它附上了更多的属性
 class TemporalData(Data):
 
     def __init__(self,
@@ -59,7 +59,7 @@ class TemporalData(Data):
 
 
 class DistanceDropEdge(object):
-
+# 指定drop的阈值，即此处的max_distance ，也就是我们指定的local_radius
     def __init__(self, max_distance: Optional[float] = None) -> None:
         self.max_distance = max_distance
 
@@ -69,12 +69,14 @@ class DistanceDropEdge(object):
         if self.max_distance is None:
             return edge_index, edge_attr
         row, col = edge_index
+        # 即计算edge_attr的L2范数,如果小于设定的local_radius,则筛选出满足该条件的边,mask应该是一个全由bool值组成的矩阵,后续debug时再验证.231229-13:57
         mask = torch.norm(edge_attr, p=2, dim=-1) < self.max_distance
-        edge_index = torch.stack([row[mask], col[mask]], dim=0)
+        # 获取经过筛选后的edge_index和edge_attr
+        edge_index = torch.stack([row[mask], col[mask]], dim=0) 
         edge_attr = edge_attr[mask]
         return edge_index, edge_attr
 
-
+# 参数初始化,很有学问,可以查阅相关资料
 def init_weights(m: nn.Module) -> None:
     if isinstance(m, nn.Linear):
         nn.init.xavier_uniform_(m.weight)

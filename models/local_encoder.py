@@ -70,34 +70,46 @@ class LocalEncoder(nn.Module):
     #  -> 这个符号代表指定方法的返回值类型，这里是torch.Tensor
     def forward(self, data: TemporalData) -> torch.Tensor:
         for t in range(self.historical_steps): # 沿时间轴，在每一时刻上进行
+            # 获取当前时刻的子图
+            # 变量后的 _ 表示忽略该值，由于subgraph函数接收data.edge_index这个二元组作为输入，所以返回也是二元组，但是等号左侧赋值变量只有一个，另一个使用 _ 表示忽略
             data[f'edge_index_{t}'], _ = subgraph(subset=~data['padding_mask'][:, t], edge_index=data.edge_index)
+            # \ 出现在行末尾表示 续行符，下一行接着
             data[f'edge_attr_{t}'] = \
                 data['positions'][data[f'edge_index_{t}'][0], t] - data['positions'][data[f'edge_index_{t}'][1], t]
         if self.parallel:
+            # 如果使用并行计算，则创建包含historical_steps个数据的空列表，然后遍历每个historical_step
             snapshots = [None] * self.historical_steps
             for t in range(self.historical_steps):
+                # drop_edge函数用于去除边，self.drop_edge = DistanceDropEdge(local_radius),这个对象返回的是edge_index和edge_attr（详情见utils.py中）
                 edge_index, edge_attr = self.drop_edge(data[f'edge_index_{t}'], data[f'edge_attr_{t}'])
+                # snapshots列表中的每个元素都是torch_geometric.data类型的(这里表示为Data),该数据类型详情可参见:https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.data.Data.html#torch_geometric.data.Data
+                # 续上一行,总的来说,snapshots列表中的每个元素包含了对应时刻的节点特征x,边索引(coo format),边特征,图的节点数量 这些信息
                 snapshots[t] = Data(x=data.x[:, t], edge_index=edge_index, edge_attr=edge_attr,
                                     num_nodes=data.num_nodes)
+            # 将snapshots聊表转换为batch对象,并使用aa_encoder对输入进行编码
             batch = Batch.from_data_list(snapshots)
+            # 输出的形状被reshape成[T,N,D],其中T为时间步数,N为节点数目,D为编码结果的维度
             out = self.aa_encoder(x=batch.x, t=None, edge_index=batch.edge_index, edge_attr=batch.edge_attr,
                                   bos_mask=data['bos_mask'], rotate_mat=data['rotate_mat'])
             out = out.view(self.historical_steps, out.shape[0] // self.historical_steps, -1)
         else:
+            # 如果不采用并行计算,则遍历每个时间步,后续操作和上面一样,得到A-A interaction的out
             out = [None] * self.historical_steps
             for t in range(self.historical_steps):
                 edge_index, edge_attr = self.drop_edge(data[f'edge_index_{t}'], data[f'edge_attr_{t}'])
                 out[t] = self.aa_encoder(x=data.x[:, t], t=t, edge_index=edge_index, edge_attr=edge_attr,
                                          bos_mask=data['bos_mask'][:, t], rotate_mat=data['rotate_mat'])
             out = torch.stack(out)  # [T, N, D]
+        # 将A-A interaction的输出作为temporal_encoder的输入,经过temporal_encoder后输入到下方的A-L interaction中
         out = self.temporal_encoder(x=out, padding_mask=data['padding_mask'][:, : self.historical_steps])
         edge_index, edge_attr = self.drop_edge(data['lane_actor_index'], data['lane_actor_vectors'])
         out = self.al_encoder(x=(data['lane_vectors'], out), edge_index=edge_index, edge_attr=edge_attr,
                               is_intersections=data['is_intersections'], turn_directions=data['turn_directions'],
                               traffic_controls=data['traffic_controls'], rotate_mat=data['rotate_mat'])
+        # 至此,完成local_encoder的所有内容,得到的输出out准备进入global_encoder
         return out
 
-
+# AAEncoder类继承自MessagePassing,是图神经网络传递信息的基类,可参考:https://pytorch-geometric.readthedocs.io/en/latest/tutorial/create_gnn.html#the-messagepassing-base-class
 class AAEncoder(MessagePassing):
 
     def __init__(self,
@@ -109,13 +121,15 @@ class AAEncoder(MessagePassing):
                  dropout: float = 0.1,
                  parallel: bool = False,
                  **kwargs) -> None:
+        # 调用torch_geometric.nn.MessagePassing类的构造函数,并将aggr参数设置为'add', aggr是aggregate聚合,用于消息传递的聚合方式,还可以设置为'mean\max'之类的
         super(AAEncoder, self).__init__(aggr='add', node_dim=0, **kwargs)
         self.historical_steps = historical_steps
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.parallel = parallel
-
+        # 中心智能体的embedding
         self.center_embed = SingleInputEmbedding(in_channel=node_dim, out_channel=embed_dim)
+        # 邻近智能体的embedding
         self.nbr_embed = MultipleInputEmbedding(in_channels=[node_dim, edge_dim], out_channel=embed_dim)
         self.lin_q = nn.Linear(embed_dim, embed_dim)
         self.lin_k = nn.Linear(embed_dim, embed_dim)
@@ -134,6 +148,7 @@ class AAEncoder(MessagePassing):
             nn.Dropout(dropout),
             nn.Linear(embed_dim * 4, embed_dim),
             nn.Dropout(dropout))
+        # bos_token表示BOS(开始)符号的嵌入表示,EOS是结束符号.在序列信息处理中,BOS表示Begining Of Sequence, EOS表示End Of Sequence
         self.bos_token = nn.Parameter(torch.Tensor(historical_steps, embed_dim))
         nn.init.normal_(self.bos_token, mean=0., std=.02)
         self.apply(init_weights)
@@ -167,6 +182,7 @@ class AAEncoder(MessagePassing):
         center_embed = center_embed + self._ff_block(self.norm2(center_embed))
         return center_embed
 
+    # 负责计算每条边的信息 
     def message(self,
                 edge_index: Adj,
                 center_embed_i: torch.Tensor,
@@ -194,13 +210,14 @@ class AAEncoder(MessagePassing):
         alpha = self.attn_drop(alpha)
         return value * alpha.unsqueeze(-1)
 
+    # 负责更新每个节点的特征
     def update(self,
                inputs: torch.Tensor,
                center_embed: torch.Tensor) -> torch.Tensor:
         inputs = inputs.view(-1, self.embed_dim)
         gate = torch.sigmoid(self.lin_ih(inputs) + self.lin_hh(center_embed))
         return inputs + gate * (self.lin_self(center_embed) - inputs)
-
+    # 多头注意力模块
     def _mha_block(self,
                    center_embed: torch.Tensor,
                    x: torch.Tensor,

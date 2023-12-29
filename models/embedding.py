@@ -35,7 +35,7 @@ class SingleInputEmbedding(nn.Module):
             nn.Linear(out_channel, out_channel),
             nn.LayerNorm(out_channel))
         self.apply(init_weights)
-
+    # 只接收一个输入x,类型为tensor,返回embedding后的x
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.embed(x)
 
@@ -58,10 +58,12 @@ class MultipleInputEmbedding(nn.Module):
             nn.Linear(out_channel, out_channel),
             nn.LayerNorm(out_channel))
         self.apply(init_weights)
-
+    # 接收两个输入,一个是连续输入数据列表,另一个是分类输入数据列表
     def forward(self,
                 continuous_inputs: List[torch.Tensor],
+                # optional的意思是分类输入数据列表的类型可以是tensor,也可以是none
                 categorical_inputs: Optional[List[torch.Tensor]] = None) -> torch.Tensor:
+        # 对连续输入数据列表中的每个数据进行embedding处理,然后对其进行求和得到输出
         for i in range(len(self.module_list)):
             continuous_inputs[i] = self.module_list[i](continuous_inputs[i])
         output = torch.stack(continuous_inputs).sum(dim=0)
