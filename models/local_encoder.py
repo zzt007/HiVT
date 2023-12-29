@@ -135,10 +135,13 @@ class AAEncoder(MessagePassing):
         self.lin_k = nn.Linear(embed_dim, embed_dim)
         self.lin_v = nn.Linear(embed_dim, embed_dim)
         self.lin_self = nn.Linear(embed_dim, embed_dim)
+        # 这个是和attention drop技术一样的吗？
         self.attn_drop = nn.Dropout(dropout)
+        # 下面这两个ih 和 hh 是什么的简称，现在还不知道。 231229--16：52
         self.lin_ih = nn.Linear(embed_dim, embed_dim)
         self.lin_hh = nn.Linear(embed_dim, embed_dim)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
+        # 映射、投射的dropout，其实就是维度的变化
         self.proj_drop = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
@@ -150,24 +153,32 @@ class AAEncoder(MessagePassing):
             nn.Dropout(dropout))
         # bos_token表示BOS(开始)符号的嵌入表示,EOS是结束符号.在序列信息处理中,BOS表示Begining Of Sequence, EOS表示End Of Sequence
         self.bos_token = nn.Parameter(torch.Tensor(historical_steps, embed_dim))
+        # init.normal_是按照正态分布为bos_token进行赋值，该正态分布的均值为0，标准差为0.02，生成服从该分布的随机数，或许有利于模型的训练和收敛
         nn.init.normal_(self.bos_token, mean=0., std=.02)
         self.apply(init_weights)
 
     def forward(self,
                 x: torch.Tensor,
                 t: Optional[int],
-                edge_index: Adj,
+                edge_index: Adj, # Adj 表示一个邻接矩阵（adjacency matrix）
                 edge_attr: torch.Tensor,
                 bos_mask: torch.Tensor,
                 rotate_mat: Optional[torch.Tensor] = None,
                 size: Size = None) -> torch.Tensor:
         if self.parallel:
             if rotate_mat is None:
+                # self.center_embed = SingleInputEmbedding(in_channel=node_dim, out_channel=embed_dim)，return embed(x)
                 center_embed = self.center_embed(x.view(self.historical_steps, x.shape[0] // self.historical_steps, -1))
             else:
+                # 将rotate_mat扩展到和x相同的形状，expand方法不会修改原始张量的形状，而是创建一个新的扩展后的张量。 *sizes，sizes是可变参数，表示要扩展的新形状，若维度为-1，则表示不变。
+                # unsqueeze()和squeeze()都是用于操作张量的维度，前者用于在指定维度上插入一个新的维度，后者用于删除张量中大小为1的维度
                 center_embed = self.center_embed(
                     torch.matmul(x.view(self.historical_steps, x.shape[0] // self.historical_steps, -1).unsqueeze(-2),
                                  rotate_mat.expand(self.historical_steps, *rotate_mat.shape)).squeeze(-2))
+            '''
+            torch.where是用于根据给定条件选择张量的不同部分，第一个参数是condition（布尔张量），用于指定要在x或y中选择的条件。
+            x和y是需要进行比较的两个张量，如果condition的某个元素为true,则返回与x相同位置的元素，如果condition的某个元素为false，则返回与y相同位置的元素。
+            '''
             center_embed = torch.where(bos_mask.t().unsqueeze(-1),
                                        self.bos_token.unsqueeze(-2),
                                        center_embed).view(x.shape[0], -1)
@@ -177,8 +188,10 @@ class AAEncoder(MessagePassing):
             else:
                 center_embed = self.center_embed(torch.bmm(x.unsqueeze(-2), rotate_mat).squeeze(-2))
             center_embed = torch.where(bos_mask.unsqueeze(-1), self.bos_token[t], center_embed)
+        # 这里用的残差网络的思想，本身 加上 经过mha处理的
         center_embed = center_embed + self._mha_block(self.norm1(center_embed), x, edge_index, edge_attr, rotate_mat,
                                                       size)
+        # ff block是前馈神经网络模块，也有残差
         center_embed = center_embed + self._ff_block(self.norm2(center_embed))
         return center_embed
 
