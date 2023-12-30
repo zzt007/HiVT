@@ -188,10 +188,10 @@ class AAEncoder(MessagePassing):
             else:
                 center_embed = self.center_embed(torch.bmm(x.unsqueeze(-2), rotate_mat).squeeze(-2))
             center_embed = torch.where(bos_mask.unsqueeze(-1), self.bos_token[t], center_embed)
-        # 这里用的残差网络的思想，本身 加上 经过mha处理的
+        # 这里用的残差网络的思想，本身 加上 经过mha处理的。这里要看标准transformer的一个流程图，就可以清晰地知道。
         center_embed = center_embed + self._mha_block(self.norm1(center_embed), x, edge_index, edge_attr, rotate_mat,
                                                       size)
-        # ff block是前馈神经网络模块，也有残差
+        # ff block是前馈神经网络模块，经过上面一句的残差concatenate后，输入进ff中，又有一次残差
         center_embed = center_embed + self._ff_block(self.norm2(center_embed))
         return center_embed
 
@@ -206,20 +206,27 @@ class AAEncoder(MessagePassing):
                 ptr: OptTensor,
                 size_i: Optional[int]) -> torch.Tensor:
         if rotate_mat is None:
+            # 对邻近智能体进行embedding，原句为self.nbr_embed = MultipleInputEmbedding(in_channels=[node_dim, edge_dim], out_channel=embed_dim)
+            # 下面这句只输入了第一个in_channels参数（list类型的），第二个参数没有指明，这样调用不会报type error吗？
             nbr_embed = self.nbr_embed([x_j, edge_attr])
         else:
             if self.parallel:
+                # repeat（x,times,axis），x代表输入的矩阵，times代表每个元素需要重复的次数，axis代表指定在哪一维度上重复
                 center_rotate_mat = rotate_mat.repeat(self.historical_steps, 1, 1)[edge_index[1]]
             else:
+                # 得到基于中心智能体的旋转矩阵，见论文中有描述
                 center_rotate_mat = rotate_mat[edge_index[1]]
+            # 利用nbr_embed，即MultipleInputEmbedding对带有旋转矩阵的输入进行编码，得到邻近智能体的embedding
             nbr_embed = self.nbr_embed([torch.bmm(x_j.unsqueeze(-2), center_rotate_mat).squeeze(-2),
                                         torch.bmm(edge_attr.unsqueeze(-2), center_rotate_mat).squeeze(-2)])
+        # 中心智能体的embedding作为q，邻近智能体的embedding作为k和v，进行qkv计算
         query = self.lin_q(center_embed_i).view(-1, self.num_heads, self.embed_dim // self.num_heads)
         key = self.lin_k(nbr_embed).view(-1, self.num_heads, self.embed_dim // self.num_heads)
         value = self.lin_v(nbr_embed).view(-1, self.num_heads, self.embed_dim // self.num_heads)
         scale = (self.embed_dim // self.num_heads) ** 0.5
         alpha = (query * key).sum(dim=-1) / scale
         alpha = softmax(alpha, index, ptr, size_i)
+        # 这一步的drop没看懂，是对应了论文中的gating function部分吗？
         alpha = self.attn_drop(alpha)
         return value * alpha.unsqueeze(-1)
 
