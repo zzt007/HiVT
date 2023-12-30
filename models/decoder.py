@@ -101,10 +101,12 @@ class MLPDecoder(nn.Module):
         self.uncertain = uncertain
         self.min_scale = min_scale
 
+        # 用于聚合local和global的embedding
         self.aggr_embed = nn.Sequential(
             nn.Linear(self.input_size + self.hidden_size, self.hidden_size),
             nn.LayerNorm(self.hidden_size),
             nn.ReLU(inplace=True))
+        # 用于得到location
         self.loc = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.LayerNorm(self.hidden_size),

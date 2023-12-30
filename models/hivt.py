@@ -75,15 +75,18 @@ class HiVT(pl.LightningModule):
                                                   num_layers=num_global_layers,
                                                   dropout=dropout,
                                                   rotate=rotate)
+        # 定义MLP解码器，代码里还有个UGRU解码器
         self.decoder = MLPDecoder(local_channels=embed_dim,
                                   global_channels=embed_dim,
                                   future_steps=future_steps,
                                   num_modes=num_modes,
                                   uncertain=True)
-        
+        # 计算回归损失
         self.reg_loss = LaplaceNLLLoss(reduction='mean')
+        # 计算分类损失
         self.cls_loss = SoftTargetCrossEntropyLoss(reduction='mean')
 
+        # 实例化三个评价指标对象
         self.minADE = ADE()
         self.minFDE = FDE()
         self.minMR = MR()
@@ -107,7 +110,8 @@ class HiVT(pl.LightningModule):
 
         local_embed = self.local_encoder(data=data)
         global_embed = self.global_interactor(data=data, local_embed=local_embed)
-        # 在论文中，an MLP decoder receives local and global representation as inputs ,and outputs the location and its associated uncertainty,所以这里的y_hat 和 pi是否指代这两个？
+        # 在论文中，an MLP decoder receives local and global representation as inputs ,and outputs the location and its associated uncertainty，所以y_hat是location（带不带uncertainty取决于设置）
+        # pi代表的是  the mixing coefficients of the mixture model for each agent(体现多模态)，个人理解是pi代表了各车可能行驶的方向的概率
         y_hat, pi = self.decoder(local_embed=local_embed, global_embed=global_embed)
         return y_hat, pi
 

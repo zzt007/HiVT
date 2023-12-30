@@ -226,7 +226,6 @@ class AAEncoder(MessagePassing):
         scale = (self.embed_dim // self.num_heads) ** 0.5
         alpha = (query * key).sum(dim=-1) / scale
         alpha = softmax(alpha, index, ptr, size_i)
-        # 这一步的drop没看懂，是对应了论文中的gating function部分吗？
         alpha = self.attn_drop(alpha)
         return value * alpha.unsqueeze(-1)
 
@@ -235,8 +234,11 @@ class AAEncoder(MessagePassing):
                inputs: torch.Tensor,
                center_embed: torch.Tensor) -> torch.Tensor:
         inputs = inputs.view(-1, self.embed_dim)
+        # 根据论文所述的gating function来进行更新，在论文中，g=sigmoid（W^gate[z,m])，其中z为中心智能体的embedding，m为 alpha*value（environment features）
         gate = torch.sigmoid(self.lin_ih(inputs) + self.lin_hh(center_embed))
+        # 这里其实就是对应论文中的公式（7），写成这样或许更容易看懂： gate*(self.lin_self(center_embed)) + (1-gate)*inputs 。也就是说，这里inputs对应m（environment features）
         return inputs + gate * (self.lin_self(center_embed) - inputs)
+    
     # 多头注意力模块
     def _mha_block(self,
                    center_embed: torch.Tensor,
@@ -245,10 +247,17 @@ class AAEncoder(MessagePassing):
                    edge_attr: torch.Tensor,
                    rotate_mat: Optional[torch.Tensor],
                    size: Size) -> torch.Tensor:
+        # 原型为self.out_proj = nn.Linear(embed_dim, embed_dim)，但这里采用self.propagate方法的返回值作为out_proj方法的参数
+        '''
+        对self.propagate方法的说明：在整个文件中，没有显式地定义这个方法，但是为什么能调用呢？这是因为AAEncoder类是继承自MessagePassing基类的，所以能够调用父类的方法。
+        值得一提的是，propagate方法在内部还会调用message() , aggregate() , update()方法，这也就是为什么在整段代码中都没有看到哪里有显式地调用这几个方法。
+        具体可以参考官方文档：https://pytorch-geometric.readthedocs.io/en/latest/notes/create_gnn.html
+        '''
         center_embed = self.out_proj(self.propagate(edge_index=edge_index, x=x, center_embed=center_embed,
                                                     edge_attr=edge_attr, rotate_mat=rotate_mat, size=size))
         return self.proj_drop(center_embed)
-
+    
+    # 前馈神经网络，这里由一个mlp实现，mlp的具体结构见上面的初始化init定义
     def _ff_block(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
 
@@ -265,10 +274,16 @@ class TemporalEncoder(nn.Module):
         encoder_layer = TemporalEncoderLayer(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=num_layers,
                                                          norm=nn.LayerNorm(embed_dim))
+        # nn.Parameter用于表示模型中的可学习参数。
+        # padding_token，一般输入是固定长度的序列，所以要对不满足固定长度的序列进行padding
         self.padding_token = nn.Parameter(torch.Tensor(historical_steps, 1, embed_dim))
+        # 在序列数据的开头添加cls_token，可以参考BERT中的做法,是bert中用于区分token属于哪一个序列的做法之一
         self.cls_token = nn.Parameter(torch.Tensor(1, 1, embed_dim))
+        # positional embedding，用于获取序列的时序信息
         self.pos_embed = nn.Parameter(torch.Tensor(historical_steps + 1, 1, embed_dim))
+        # attention mask，用于在训练过程中为每个样本屏蔽掉当前时刻之后的数据
         attn_mask = self.generate_square_subsequent_mask(historical_steps + 1)
+        # 开辟attention mask的缓冲区，使其可以被模型访问和使用，在模型的前向传播过程中，可以直接使用mask而不用每次都重新计算；且当其被register成模型的属性后，可以在训练过程中被优化器更新
         self.register_buffer('attn_mask', attn_mask)
         nn.init.normal_(self.padding_token, mean=0., std=.02)
         nn.init.normal_(self.cls_token, mean=0., std=.02)
@@ -278,14 +293,17 @@ class TemporalEncoder(nn.Module):
     def forward(self,
                 x: torch.Tensor,
                 padding_mask: torch.Tensor) -> torch.Tensor:
+        # 这里主要是给出关于输入x的representation，同样也是参考BERT中的做法，对于给定的输入token，其representation可以由三部分组成，即 token本身的embedding + cls_token(表示该token在哪个序列中) + positional embedding
         x = torch.where(padding_mask.t().unsqueeze(-1), self.padding_token, x)
         expand_cls_token = self.cls_token.expand(-1, x.shape[1], -1)
         x = torch.cat((x, expand_cls_token), dim=0)
         x = x + self.pos_embed
+        # 得到x的representation后，输入进nn.TransformerEncoder方法中进行编码
         out = self.transformer_encoder(src=x, mask=self.attn_mask, src_key_padding_mask=None)
         return out[-1]  # [N, D]
 
     @staticmethod
+    # 在transformer中常见的生成attention mask的写法，网上有很多可以参考
     def generate_square_subsequent_mask(seq_len: int) -> torch.Tensor:
         mask = (torch.triu(torch.ones(seq_len, seq_len)) == 1).transpose(0, 1)
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
@@ -299,6 +317,7 @@ class TemporalEncoderLayer(nn.Module):
                  num_heads: int = 8,
                  dropout: float = 0.1) -> None:
         super(TemporalEncoderLayer, self).__init__()
+        # 直接调用nn.Module里带的多头注意力机制实现
         self.self_attn = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
         self.linear1 = nn.Linear(embed_dim, embed_dim * 4)
         self.dropout = nn.Dropout(dropout)
@@ -321,6 +340,7 @@ class TemporalEncoderLayer(nn.Module):
                   x: torch.Tensor,
                   attn_mask: Optional[torch.Tensor],
                   key_padding_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        # attn_mask,key_paddingg_mask,need_weights这些是MultiheadAttention的其他可选参数，具体可见nn的参考文档
         x = self.self_attn(x, x, x, attn_mask=attn_mask, key_padding_mask=key_padding_mask, need_weights=False)[0]
         return self.dropout1(x)
 
@@ -328,7 +348,7 @@ class TemporalEncoderLayer(nn.Module):
         x = self.linear2(self.dropout(F.relu_(self.linear1(x))))
         return self.dropout2(x)
 
-
+# 感觉涉及到interaction的类都是基于torch_geometric实现的，涉及到transformer相关的是基于nn.Module。这里是A-L interaction，所以继承自基类MessagePassing
 class ALEncoder(MessagePassing):
 
     def __init__(self,
@@ -338,6 +358,7 @@ class ALEncoder(MessagePassing):
                  num_heads: int = 8,
                  dropout: float = 0.1,
                  **kwargs) -> None:
+        # 同样如A-A interaction中的，指定消息聚合(aggregate)方式为add
         super(ALEncoder, self).__init__(aggr='add', node_dim=0, **kwargs)
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -381,9 +402,19 @@ class ALEncoder(MessagePassing):
         is_intersections = is_intersections.long()
         turn_directions = turn_directions.long()
         traffic_controls = traffic_controls.long()
+        '''
+        out = self.temporal_encoder(x=out, padding_mask=data['padding_mask'][:, : self.historical_steps])
+        edge_index, edge_attr = self.drop_edge(data['lane_actor_index'], data['lane_actor_vectors'])
+        out = self.al_encoder(x=(data['lane_vectors'], out), edge_index=edge_index, edge_attr=edge_attr,
+                              is_intersections=data['is_intersections'], turn_directions=data['turn_directions'],
+                              traffic_controls=data['traffic_controls'], rotate_mat=data['rotate_mat'])
+        上述三句代码表示调用al_encoder的具体过程，可以看到其输入x=(data['lane_vectors'],out) ,lane_vectors是知道的，其中out是经过temporal_encoder后的编码表示
+        '''
+        # 这里的x_actor = out，即是中心智能体经过temporal encoder后的编码表示。然后再与 x_lane(即lane_vectors)在多头注意力机制中进行交互，最终得到A-L interaction结果
         x_actor = x_actor + self._mha_block(self.norm1(x_actor), x_lane, edge_index, edge_attr, is_intersections,
                                             turn_directions, traffic_controls, rotate_mat, size)
         x_actor = x_actor + self._ff_block(self.norm2(x_actor))
+        # 至此，完成了local_encoder的所有内容，得到了可以输入进global_interaction的变量x_actor
         return x_actor
 
     def message(self,
@@ -405,11 +436,13 @@ class ALEncoder(MessagePassing):
                                    self.traffic_control_embed[traffic_controls_j]])
         else:
             rotate_mat = rotate_mat[edge_index[1]]
+            # self.lane_embed即为 MultipleInputEmbedding(in_channels=[node_dim, edge_dim], out_channel=embed_dim)
             x_j = self.lane_embed([torch.bmm(x_j.unsqueeze(-2), rotate_mat).squeeze(-2),
                                    torch.bmm(edge_attr.unsqueeze(-2), rotate_mat).squeeze(-2)],
                                   [self.is_intersection_embed[is_intersections_j],
                                    self.turn_direction_embed[turn_directions_j],
                                    self.traffic_control_embed[traffic_controls_j]])
+        # x_i其实就是中心智能体i，x_j就是邻近智能体j，根据论文所述，i为query，j为key和value，然后进行qkv运算
         query = self.lin_q(x_i).view(-1, self.num_heads, self.embed_dim // self.num_heads)
         key = self.lin_k(x_j).view(-1, self.num_heads, self.embed_dim // self.num_heads)
         value = self.lin_v(x_j).view(-1, self.num_heads, self.embed_dim // self.num_heads)
@@ -419,6 +452,7 @@ class ALEncoder(MessagePassing):
         alpha = self.attn_drop(alpha)
         return value * alpha.unsqueeze(-1)
 
+    # 和之前A-A interaciton中update差不多
     def update(self,
                inputs: torch.Tensor,
                x: torch.Tensor) -> torch.Tensor:

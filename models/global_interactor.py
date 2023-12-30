@@ -64,6 +64,7 @@ class GlobalInteractor(nn.Module):
         if data['rotate_mat'] is None:
             rel_embed = self.rel_embed(rel_pos)
         else:
+            # 根据论文公式（12）进行如下计算
             rel_pos = torch.bmm(rel_pos.unsqueeze(-2), data['rotate_mat'][edge_index[1]]).squeeze(-2)
             rel_theta = data['rotate_angles'][edge_index[0]] - data['rotate_angles'][edge_index[1]]
             rel_theta_cos = torch.cos(rel_theta).unsqueeze(-1)
@@ -77,7 +78,7 @@ class GlobalInteractor(nn.Module):
         x = x.transpose(0, 1)  # [F, N, D]
         return x
 
-
+# 同样的，用于描述节点关系的类都基于MessagePassing建立
 class GlobalInteractorLayer(MessagePassing):
 
     def __init__(self,
@@ -88,7 +89,8 @@ class GlobalInteractorLayer(MessagePassing):
         super(GlobalInteractorLayer, self).__init__(aggr='add', node_dim=0, **kwargs)
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-
+        # 为什么没有lin_q_edge呢？这是因为我们在global模块中想要得到的是全局的agent和中心智能体之间的关系，我们设定中心智能体为query，邻近智能体为key和value。
+        # 为什么k和v要区分node和edge呢？根据论文所述，local是以actor-centric的，所以为了在global中进行交互时能够意识到不同坐标系之间的差别，我们将这种差别参数化为了两部分（具体可见论文公式（12））
         self.lin_q_node = nn.Linear(embed_dim, embed_dim)
         self.lin_k_node = nn.Linear(embed_dim, embed_dim)
         self.lin_k_edge = nn.Linear(embed_dim, embed_dim)
@@ -134,6 +136,7 @@ class GlobalInteractorLayer(MessagePassing):
         alpha = (query * (key_node + key_edge)).sum(dim=-1) / scale
         alpha = softmax(alpha, index, ptr, size_i)
         alpha = self.attn_drop(alpha)
+        # 将node和edge合并
         return (value_node + value_edge) * alpha.unsqueeze(-1)
 
     def update(self,
