@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+# itertools是python标准库中的一个模块，提供一系列用于生成和处理迭代器的函数。
+# permutations函数生成序列的所有可能的排列
 from itertools import permutations
+# product函数生成笛卡尔积
 from itertools import product
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -26,9 +29,10 @@ from tqdm import tqdm
 
 from utils import TemporalData
 
-
+# 这里继承的是geometric.data中的Dataset基类，简单来说就是用于创建图数据
+# 详情参考：https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.data.Dataset.html#torch_geometric.data.Dataset
 class ArgoverseV1Dataset(Dataset):
-
+    # root:数据集存放的地址（目录）、split：按目的划分数据集、transform：对数据进行转换 ，转换可以理解为对数据的操作，如缩放scale之类？  
     def __init__(self,
                  root: str,
                  split: str,
@@ -36,6 +40,7 @@ class ArgoverseV1Dataset(Dataset):
                  local_radius: float = 50) -> None:
         self._split = split
         self._local_radius = local_radius
+        # 下划线前缀通常用于将属性与类名称区分，f代表将split变量插入到字符串中
         self._url = f'https://s3.amazonaws.com/argoai-argoverse/forecasting_{split}_v1.1.tar.gz'
         if split == 'sample':
             self._directory = 'forecasting_sample'
@@ -49,10 +54,13 @@ class ArgoverseV1Dataset(Dataset):
             raise ValueError(split + ' is not valid')
         self.root = root
         self._raw_file_names = os.listdir(self.raw_dir)
+        # os.path.splitext函数将文件名分割为两部分，前部分是文件名（不包含扩展名），后部分是扩展名
         self._processed_file_names = [os.path.splitext(f)[0] + '.pt' for f in self.raw_file_names]
+        # 将上一句得到的文件存入到processed_dir中，processed_dir的定义在下方有说明 = os.path.join(self.root,self._directory,'processed')
         self._processed_paths = [os.path.join(self.processed_dir, f) for f in self._processed_file_names]
         super(ArgoverseV1Dataset, self).__init__(root, transform=transform)
 
+    # @property是python的一个装饰器，用于将一个方法转为属性，属性是类的一个成员，可以直接通过类名访问，而不需要使用点（.）运算符
     @property
     def raw_dir(self) -> str:
         return os.path.join(self.root, self._directory, 'data')
@@ -61,6 +69,7 @@ class ArgoverseV1Dataset(Dataset):
     def processed_dir(self) -> str:
         return os.path.join(self.root, self._directory, 'processed')
 
+    # Union是一个类型注释，用于指定一个类型的变量可以具有多个可能的类型。在此处，raw_file_names方法的返回值可以是str、List[str]、Tuple
     @property
     def raw_file_names(self) -> Union[str, List[str], Tuple]:
         return self._raw_file_names
@@ -75,6 +84,7 @@ class ArgoverseV1Dataset(Dataset):
 
     def process(self) -> None:
         am = ArgoverseMap()
+        # 对每个文件进行处理
         for raw_path in tqdm(self.raw_paths):
             kwargs = process_argoverse(self._split, raw_path, am, self._local_radius)
             data = TemporalData(**kwargs)
@@ -91,46 +101,67 @@ def process_argoverse(split: str,
                       raw_path: str,
                       am: ArgoverseMap,
                       radius: float) -> Dict:
+    # 从raw_path中读取csv文件
     df = pd.read_csv(raw_path)
 
-    # filter out actors that are unseen during the historical time steps
+    # filter out actors that are unseen during the historical time steps，去除掉那些在观测时间内不可见的车辆
     timestamps = list(np.sort(df['TIMESTAMP'].unique()))
     historical_timestamps = timestamps[: 20]
+    # isin是python中的一个内置方法，用于检查一个数组中的元素是否存在于另一个数组中
     historical_df = df[df['TIMESTAMP'].isin(historical_timestamps)]
+    # 获取观测时间内对应的车辆ID信息
     actor_ids = list(historical_df['TRACK_ID'].unique())
     df = df[df['TRACK_ID'].isin(actor_ids)]
+    # 统计观测时间内车辆的数目
     num_nodes = len(actor_ids)
 
+    # AV是argoverse数据集中对自车的标签
     av_df = df[df['OBJECT_TYPE'] == 'AV'].iloc
     av_index = actor_ids.index(av_df[0]['TRACK_ID'])
+    # AGENT是argoverse数据集中对目标智能体的标签
     agent_df = df[df['OBJECT_TYPE'] == 'AGENT'].iloc
     agent_index = actor_ids.index(agent_df[0]['TRACK_ID'])
     city = df['CITY_NAME'].values[0]
 
-    # make the scene centered at AV
+    # make the scene centered at AV，让场景以自车为中心
     origin = torch.tensor([av_df[19]['X'], av_df[19]['Y']], dtype=torch.float)
+    # 自车的航向矢量
     av_heading_vector = origin - torch.tensor([av_df[18]['X'], av_df[18]['Y']], dtype=torch.float)
+    # 航向角
     theta = torch.atan2(av_heading_vector[1], av_heading_vector[0])
+    # 使用自车航向角参数化的旋转矩阵
     rotate_mat = torch.tensor([[torch.cos(theta), -torch.sin(theta)],
                                [torch.sin(theta), torch.cos(theta)]])
 
     # initialization
+    # 初始化x，num_nodes是车辆总数，50是观测时间+预测时间对应的点数（10hz），2是对应车辆xy坐标值
     x = torch.zeros(num_nodes, 50, 2, dtype=torch.float)
+    '''
+    边的索引，permutation用于生成所有可能的边（在所有节点数之间两两组合），permutation方法返回一个包含所有可能边的列表，然后list将其转化为python的列表类型，然后torch再将其转为LongTensor张量；
+    t().contiguous()方法将张量的形状转为（2，num_edges），其中num_edges是边的数量；
+    具体形状可以试着自己打印一下。打印出来，发现这个边的表述其实类似于sparse COO format。belike👇 (这里是取了num_nodes=5)
+    tensro([[0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4],
+            [1,2,3,4,0,2,3,4,0,1,3,4,0,1,2,4,0,1,2,3]])
+    '''
     edge_index = torch.LongTensor(list(permutations(range(num_nodes), 2))).t().contiguous()
-    padding_mask = torch.ones(num_nodes, 50, dtype=torch.bool)
+    # 创建相关mask和旋转角的矩阵
+    padding_mask = torch.ones(num_nodes, 50, dtype=torch.bool) # 创建初始都是true
     bos_mask = torch.zeros(num_nodes, 20, dtype=torch.bool)
     rotate_angles = torch.zeros(num_nodes, dtype=torch.float)
 
+    # 按照指定的列进行分组，这里按‘TRACK_ID’划分
     for actor_id, actor_df in df.groupby('TRACK_ID'):
         node_idx = actor_ids.index(actor_id)
         node_steps = [timestamps.index(timestamp) for timestamp in actor_df['TIMESTAMP']]
         padding_mask[node_idx, node_steps] = False
         if padding_mask[node_idx, 19]:  # make no predictions for actors that are unseen at the current time step
             padding_mask[node_idx, 20:] = True
+        # 获取车辆的xy坐标信息
         xy = torch.from_numpy(np.stack([actor_df['X'].values, actor_df['Y'].values], axis=-1)).float()
+        # xy-origin 即从绝对坐标转成相对坐标（相对自车的origin时刻，即观测时间末时刻），再与旋转矩阵相乘，得到以观测时间末时刻为中心的坐标系下的值
         x[node_idx, node_steps] = torch.matmul(xy - origin, rotate_mat)
         node_historical_steps = list(filter(lambda node_step: node_step < 20, node_steps))
-        if len(node_historical_steps) > 1:  # calculate the heading of the actor (approximately)
+        if len(node_historical_steps) > 1:  # calculate the heading of the actor (approximately) 相当于对除自车以外的其它车的航向矢量和旋转角进行更新？
             heading_vector = x[node_idx, node_historical_steps[-1]] - x[node_idx, node_historical_steps[-2]]
             rotate_angles[node_idx] = torch.atan2(heading_vector[1], heading_vector[0])
         else:  # make no predictions for the actor if the number of valid time steps is less than 2
