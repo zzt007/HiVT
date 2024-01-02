@@ -45,6 +45,7 @@ class HiVT(pl.LightningModule):
                  parallel: bool,
                  lr: float,
                  weight_decay: float,
+                 # T_max:学习率更新的周期（即多少个epoch之后更新一次学习率）
                  T_max: int,
                  **kwargs) -> None:
         super(HiVT, self).__init__()

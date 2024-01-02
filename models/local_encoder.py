@@ -122,14 +122,15 @@ class AAEncoder(MessagePassing):
                  parallel: bool = False,
                  **kwargs) -> None:
         # 调用torch_geometric.nn.MessagePassing类的构造函数,并将aggr参数设置为'add', aggr是aggregate聚合,用于消息传递的聚合方式,还可以设置为'mean\max'之类的
+        # debug时发现其flow是：source_to_target
         super(AAEncoder, self).__init__(aggr='add', node_dim=0, **kwargs)
         self.historical_steps = historical_steps
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.parallel = parallel
-        # 中心智能体的embedding
+        # 中心智能体的embedding，（2，64）
         self.center_embed = SingleInputEmbedding(in_channel=node_dim, out_channel=embed_dim)
-        # 邻近智能体的embedding
+        # 邻近智能体的embedding,in_channels:(2,2),out_channels:64
         self.nbr_embed = MultipleInputEmbedding(in_channels=[node_dim, edge_dim], out_channel=embed_dim)
         self.lin_q = nn.Linear(embed_dim, embed_dim)
         self.lin_k = nn.Linear(embed_dim, embed_dim)
@@ -152,6 +153,7 @@ class AAEncoder(MessagePassing):
             nn.Linear(embed_dim * 4, embed_dim),
             nn.Dropout(dropout))
         # bos_token表示BOS(开始)符号的嵌入表示,EOS是结束符号.在序列信息处理中,BOS表示Begining Of Sequence, EOS表示End Of Sequence
+        # shape:torch.size([20,64])
         self.bos_token = nn.Parameter(torch.Tensor(historical_steps, embed_dim))
         # init.normal_是按照正态分布为bos_token进行赋值，该正态分布的均值为0，标准差为0.02，生成服从该分布的随机数，或许有利于模型的训练和收敛
         nn.init.normal_(self.bos_token, mean=0., std=.02)
@@ -275,11 +277,11 @@ class TemporalEncoder(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=num_layers,
                                                          norm=nn.LayerNorm(embed_dim))
         # nn.Parameter用于表示模型中的可学习参数。
-        # padding_token，一般输入是固定长度的序列，所以要对不满足固定长度的序列进行padding
+        # padding_token，一般输入是固定长度的序列，所以要对不满足固定长度的序列进行padding; shape = torch.size([20,1,64])
         self.padding_token = nn.Parameter(torch.Tensor(historical_steps, 1, embed_dim))
-        # 在序列数据的开头添加cls_token，可以参考BERT中的做法,是bert中用于区分token属于哪一个序列的做法之一
+        # 在序列数据的开头添加cls_token，可以参考BERT中的做法,是bert中用于区分token属于哪一个序列的做法之一;shape = torch.size([1,1,64])
         self.cls_token = nn.Parameter(torch.Tensor(1, 1, embed_dim))
-        # positional embedding，用于获取序列的时序信息
+        # positional embedding，用于获取序列的时序信息; shape = torch.size([21,1,64]),这里的21是因为论文中所述的在序列末尾append了一个可学习的token吗？还是因为在nlp中处理一般都是把第一行空出，所以才要加？
         self.pos_embed = nn.Parameter(torch.Tensor(historical_steps + 1, 1, embed_dim))
         # attention mask，用于在训练过程中为每个样本屏蔽掉当前时刻之后的数据
         attn_mask = self.generate_square_subsequent_mask(historical_steps + 1)
@@ -303,7 +305,7 @@ class TemporalEncoder(nn.Module):
         return out[-1]  # [N, D]
 
     @staticmethod
-    # 在transformer中常见的生成attention mask的写法，网上有很多可以参考
+    # 在transformer中常见的生成attention mask的写法，网上有很多可以参考；此处seq_len = 21
     def generate_square_subsequent_mask(seq_len: int) -> torch.Tensor:
         mask = (torch.triu(torch.ones(seq_len, seq_len)) == 1).transpose(0, 1)
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))

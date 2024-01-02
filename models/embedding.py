@@ -26,13 +26,13 @@ class SingleInputEmbedding(nn.Module):
                  out_channel: int) -> None:
         super(SingleInputEmbedding, self).__init__()
         self.embed = nn.Sequential(
-            nn.Linear(in_channel, out_channel),
+            nn.Linear(in_channel, out_channel), # （2，64）
             nn.LayerNorm(out_channel),
             nn.ReLU(inplace=True),
-            nn.Linear(out_channel, out_channel),
+            nn.Linear(out_channel, out_channel), # （64，64）
             nn.LayerNorm(out_channel),
             nn.ReLU(inplace=True),
-            nn.Linear(out_channel, out_channel),
+            nn.Linear(out_channel, out_channel), # （64，64）
             nn.LayerNorm(out_channel))
         self.apply(init_weights)
     # 只接收一个输入x,类型为tensor,返回embedding后的x
@@ -43,7 +43,7 @@ class SingleInputEmbedding(nn.Module):
 class MultipleInputEmbedding(nn.Module):
 
     def __init__(self,
-                 in_channels: List[int],
+                 in_channels: List[int], # in:[2,2] out:64
                  out_channel: int) -> None:
         super(MultipleInputEmbedding, self).__init__()
         self.module_list = nn.ModuleList(
